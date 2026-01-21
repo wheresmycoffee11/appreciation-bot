@@ -19,6 +19,18 @@ db.exec(`
   )
 `);
 
+// Monthly stats table for leaderboard tracking
+db.exec(`
+  CREATE TABLE IF NOT EXISTS monthly_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    helpful_count INTEGER DEFAULT 0,
+    UNIQUE(user_id, year, month)
+  )
+`);
+
 const THRESHOLDS = [1, 5, 10, 20];
 
 /**
@@ -87,11 +99,69 @@ function getMessageStats(messageId) {
   return db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
 }
 
+/**
+ * Increment a user's monthly helpful count
+ */
+function incrementMonthlyHelpful(userId) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1; // JavaScript months are 0-indexed
+
+  db.prepare(`
+    INSERT INTO monthly_stats (user_id, year, month, helpful_count)
+    VALUES (?, ?, ?, 1)
+    ON CONFLICT(user_id, year, month)
+    DO UPDATE SET helpful_count = helpful_count + 1
+  `).run(userId, year, month);
+}
+
+/**
+ * Decrement a user's monthly helpful count
+ */
+function decrementMonthlyHelpful(userId) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+
+  db.prepare(`
+    UPDATE monthly_stats
+    SET helpful_count = MAX(0, helpful_count - 1)
+    WHERE user_id = ? AND year = ? AND month = ?
+  `).run(userId, year, month);
+}
+
+/**
+ * Get top helpful users for a given month
+ */
+function getTopHelpfulUsers(year, month, limit = 5) {
+  return db.prepare(`
+    SELECT user_id, helpful_count
+    FROM monthly_stats
+    WHERE year = ? AND month = ? AND helpful_count > 0
+    ORDER BY helpful_count DESC
+    LIMIT ?
+  `).all(year, month, limit);
+}
+
+/**
+ * Get previous month's year and month
+ */
+function getPreviousMonth() {
+  const now = new Date();
+  const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+  const month = now.getMonth() === 0 ? 12 : now.getMonth(); // Previous month
+  return { year, month };
+}
+
 module.exports = {
   getOrCreateMessage,
   incrementReaction,
   decrementReaction,
   markThresholdSent,
   getMessageStats,
+  incrementMonthlyHelpful,
+  decrementMonthlyHelpful,
+  getTopHelpfulUsers,
+  getPreviousMonth,
   THRESHOLDS
 };

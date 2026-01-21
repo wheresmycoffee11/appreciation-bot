@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const { App } = require('@slack/bolt');
+const cron = require('node-cron');
 const db = require('./db');
 
 const app = new App({
@@ -12,6 +13,7 @@ const app = new App({
 
 const REACTION_NAME = 'helpful';
 const GIF_SEARCH_TERMS = ['awesome', 'great job', 'celebrate', 'thank you', 'you rock'];
+const LEADERBOARD_CHANNEL = process.env.LEADERBOARD_CHANNEL || 'dynamic-agency-hq';
 
 /**
  * Get a random GIF from Giphy
@@ -147,6 +149,9 @@ app.event('reaction_added', async ({ event, client }) => {
     messageAuthorId
   );
 
+  // Track monthly stats for the message author
+  db.incrementMonthlyHelpful(messageAuthorId);
+
   console.log(`Message ${messageId} now has ${newCount} helpful reactions`);
 
   // Send DMs for any newly crossed thresholds
@@ -178,13 +183,200 @@ app.event('reaction_removed', async ({ event }) => {
   }
 
   const messageId = `${event.item.channel}-${event.item.ts}`;
+  const messageAuthorId = event.item_user;
+
   db.decrementReaction(messageId);
 
+  // Decrement monthly stats for the message author
+  if (messageAuthorId) {
+    db.decrementMonthlyHelpful(messageAuthorId);
+  }
+
   console.log(`Reaction removed from message ${messageId}`);
+});
+
+/**
+ * Get medal emoji based on rank
+ */
+function getMedal(rank) {
+  const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+  return medals[rank] || '🏅';
+}
+
+/**
+ * Get month name from month number
+ */
+function getMonthName(month) {
+  const months = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  return months[month - 1];
+}
+
+/**
+ * Post monthly leaderboard to the designated channel
+ */
+async function postMonthlyLeaderboard() {
+  const { year, month } = db.getPreviousMonth();
+  const topUsers = db.getTopHelpfulUsers(year, month, 5);
+
+  if (topUsers.length === 0) {
+    console.log(`No helpful reactions recorded for ${getMonthName(month)} ${year}`);
+    return;
+  }
+
+  const monthName = getMonthName(month);
+
+  // Build the leaderboard message
+  const leaderboardText = topUsers.map((user, index) =>
+    `${getMedal(index)} <@${user.user_id}> — ${user.helpful_count} helpful reaction${user.helpful_count === 1 ? '' : 's'}`
+  ).join('\n');
+
+  const blocks = [
+    {
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: `🏆 ${monthName} Helpfulness Leaderboard`,
+        emoji: true
+      }
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `Congratulations to our most helpful team members from ${monthName} ${year}!\n\n${leaderboardText}`
+      }
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: 'Keep spreading the helpfulness! React with :helpful: to recognize great contributions.'
+        }
+      ]
+    }
+  ];
+
+  try {
+    await app.client.chat.postMessage({
+      channel: LEADERBOARD_CHANNEL,
+      text: `🏆 ${monthName} Helpfulness Leaderboard`,
+      blocks: blocks
+    });
+
+    console.log(`Posted ${monthName} ${year} leaderboard to #${LEADERBOARD_CHANNEL}`);
+  } catch (error) {
+    console.error('Error posting leaderboard:', error);
+  }
+}
+
+/**
+ * Post leaderboard for a specific month (or current month)
+ */
+async function postLeaderboardForMonth(year, month, channelId) {
+  const topUsers = db.getTopHelpfulUsers(year, month, 5);
+  const monthName = getMonthName(month);
+
+  if (topUsers.length === 0) {
+    return { success: false, message: `No helpful reactions recorded for ${monthName} ${year}.` };
+  }
+
+  const leaderboardText = topUsers.map((user, index) =>
+    `${getMedal(index)} <@${user.user_id}> — ${user.helpful_count} helpful reaction${user.helpful_count === 1 ? '' : 's'}`
+  ).join('\n');
+
+  const blocks = [
+    {
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: `🏆 ${monthName} Helpfulness Leaderboard`,
+        emoji: true
+      }
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `Congratulations to our most helpful team members from ${monthName} ${year}!\n\n${leaderboardText}`
+      }
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: 'Keep spreading the helpfulness! React with :helpful: to recognize great contributions.'
+        }
+      ]
+    }
+  ];
+
+  try {
+    await app.client.chat.postMessage({
+      channel: channelId,
+      text: `🏆 ${monthName} Helpfulness Leaderboard`,
+      blocks: blocks
+    });
+    return { success: true, message: `Posted ${monthName} ${year} leaderboard!` };
+  } catch (error) {
+    console.error('Error posting leaderboard:', error);
+    return { success: false, message: `Error posting leaderboard: ${error.message}` };
+  }
+}
+
+// Slash command: /leaderboard [current|last|YYYY-MM]
+app.command('/leaderboard', async ({ command, ack, respond }) => {
+  await ack();
+
+  const arg = command.text.trim().toLowerCase();
+  let year, month;
+
+  if (arg === '' || arg === 'last') {
+    // Default: show last month
+    const prev = db.getPreviousMonth();
+    year = prev.year;
+    month = prev.month;
+  } else if (arg === 'current') {
+    // Show current month so far
+    const now = new Date();
+    year = now.getFullYear();
+    month = now.getMonth() + 1;
+  } else {
+    // Try to parse YYYY-MM format
+    const match = arg.match(/^(\d{4})-(\d{1,2})$/);
+    if (match) {
+      year = parseInt(match[1], 10);
+      month = parseInt(match[2], 10);
+      if (month < 1 || month > 12) {
+        await respond('Invalid month. Use format: `/leaderboard YYYY-MM` (e.g., `/leaderboard 2025-01`)');
+        return;
+      }
+    } else {
+      await respond('Usage: `/leaderboard [current|last|YYYY-MM]`\n• `last` (default) - Previous month\n• `current` - Current month so far\n• `YYYY-MM` - Specific month (e.g., 2025-01)');
+      return;
+    }
+  }
+
+  const result = await postLeaderboardForMonth(year, month, command.channel_id);
+
+  if (!result.success) {
+    await respond(result.message);
+  }
+});
+
+// Schedule monthly leaderboard post for 9 AM on the 1st of every month
+cron.schedule('0 9 1 * *', () => {
+  console.log('Running monthly leaderboard job...');
+  postMonthlyLeaderboard();
 });
 
 // Start the app
 (async () => {
   await app.start();
   console.log('⚡️ Appreciation Bot is running in socket mode!');
+  console.log('📊 Monthly leaderboard scheduled for 9 AM on the 1st of each month');
 })();

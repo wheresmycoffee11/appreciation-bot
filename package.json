@@ -16,7 +16,8 @@
   "dependencies": {
     "@slack/bolt": "^3.17.1",
     "better-sqlite3": "^9.4.3",
-    "dotenv": "^16.4.1"
+    "dotenv": "^16.4.1",
+    "node-cron": "^3.0.3"
   },
   "engines": {
     "node": ">=18.0.0"
