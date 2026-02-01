@@ -143,14 +143,14 @@ app.event('reaction_added', async ({ event, client }) => {
   }
 
   // Increment reaction and check for new thresholds
-  const { newCount, newThresholds, userId } = db.incrementReaction(
+  const { newCount, newThresholds, userId } = await db.incrementReaction(
     messageId,
     channelId,
     messageAuthorId
   );
 
   // Track monthly stats for the message author
-  db.incrementMonthlyHelpful(messageAuthorId);
+  await db.incrementMonthlyHelpful(messageAuthorId);
 
   console.log(`Message ${messageId} now has ${newCount} helpful reactions`);
 
@@ -167,7 +167,7 @@ app.event('reaction_added', async ({ event, client }) => {
 
     for (const threshold of newThresholds) {
       await sendCongratsDMFast(client, dmChannelId, threshold, messageLink, gifUrl);
-      db.markThresholdSent(messageId, threshold);
+      await db.markThresholdSent(messageId, threshold);
     }
   }
 });
@@ -185,11 +185,11 @@ app.event('reaction_removed', async ({ event }) => {
   const messageId = `${event.item.channel}-${event.item.ts}`;
   const messageAuthorId = event.item_user;
 
-  db.decrementReaction(messageId);
+  await db.decrementReaction(messageId);
 
   // Decrement monthly stats for the message author
   if (messageAuthorId) {
-    db.decrementMonthlyHelpful(messageAuthorId);
+    await db.decrementMonthlyHelpful(messageAuthorId);
   }
 
   console.log(`Reaction removed from message ${messageId}`);
@@ -219,7 +219,7 @@ function getMonthName(month) {
  */
 async function postMonthlyLeaderboard() {
   const { year, month } = db.getPreviousMonth();
-  const topUsers = db.getTopHelpfulUsers(year, month, 5);
+  const topUsers = await db.getTopHelpfulUsers(year, month, 5);
 
   if (topUsers.length === 0) {
     console.log(`No helpful reactions recorded for ${getMonthName(month)} ${year}`);
@@ -277,7 +277,7 @@ async function postMonthlyLeaderboard() {
  * Post leaderboard for a specific month (or current month)
  */
 async function postLeaderboardForMonth(year, month, channelId) {
-  const topUsers = db.getTopHelpfulUsers(year, month, 5);
+  const topUsers = await db.getTopHelpfulUsers(year, month, 5);
   const monthName = getMonthName(month);
 
   if (topUsers.length === 0) {
@@ -376,6 +376,7 @@ cron.schedule('0 9 1 * *', () => {
 
 // Start the app
 (async () => {
+  await db.initializeDatabase();
   await app.start();
   console.log('⚡️ Appreciation Bot is running in socket mode!');
   console.log('📊 Monthly leaderboard scheduled for 9 AM on the 1st of each month');

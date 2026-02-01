@@ -1,65 +1,72 @@
-const Database = require('better-sqlite3');
-const path = require('path');
+const { Pool } = require('pg');
 
-const dbPath = path.join(__dirname, '..', 'appreciation.db');
-const db = new Database(dbPath);
-
-// Initialize database schema
-db.exec(`
-  CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    channel_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    reaction_count INTEGER DEFAULT 0,
-    threshold_1_sent INTEGER DEFAULT 0,
-    threshold_5_sent INTEGER DEFAULT 0,
-    threshold_10_sent INTEGER DEFAULT 0,
-    threshold_20_sent INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
-
-// Monthly stats table for leaderboard tracking
-db.exec(`
-  CREATE TABLE IF NOT EXISTS monthly_stats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    year INTEGER NOT NULL,
-    month INTEGER NOT NULL,
-    helpful_count INTEGER DEFAULT 0,
-    UNIQUE(user_id, year, month)
-  )
-`);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false }
+});
 
 const THRESHOLDS = [1, 5, 10, 20];
 
 /**
+ * Initialize database schema
+ */
+async function initializeDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      reaction_count INTEGER DEFAULT 0,
+      threshold_1_sent INTEGER DEFAULT 0,
+      threshold_5_sent INTEGER DEFAULT 0,
+      threshold_10_sent INTEGER DEFAULT 0,
+      threshold_20_sent INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS monthly_stats (
+      id SERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      year INTEGER NOT NULL,
+      month INTEGER NOT NULL,
+      helpful_count INTEGER DEFAULT 0,
+      UNIQUE(user_id, year, month)
+    )
+  `);
+
+  console.log('Database initialized');
+}
+
+/**
  * Get or create a message record
  */
-function getOrCreateMessage(messageId, channelId, userId) {
-  const existing = db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
+async function getOrCreateMessage(messageId, channelId, userId) {
+  const existing = await pool.query('SELECT * FROM messages WHERE id = $1', [messageId]);
 
-  if (existing) {
-    return existing;
+  if (existing.rows.length > 0) {
+    return existing.rows[0];
   }
 
-  db.prepare(`
-    INSERT INTO messages (id, channel_id, user_id, reaction_count)
-    VALUES (?, ?, ?, 0)
-  `).run(messageId, channelId, userId);
+  await pool.query(
+    'INSERT INTO messages (id, channel_id, user_id, reaction_count) VALUES ($1, $2, $3, 0)',
+    [messageId, channelId, userId]
+  );
 
-  return db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
+  const result = await pool.query('SELECT * FROM messages WHERE id = $1', [messageId]);
+  return result.rows[0];
 }
 
 /**
  * Increment reaction count and return any newly crossed thresholds
  */
-function incrementReaction(messageId, channelId, userId) {
-  const message = getOrCreateMessage(messageId, channelId, userId);
+async function incrementReaction(messageId, channelId, userId) {
+  const message = await getOrCreateMessage(messageId, channelId, userId);
   const oldCount = message.reaction_count;
   const newCount = oldCount + 1;
 
-  db.prepare('UPDATE messages SET reaction_count = ? WHERE id = ?').run(newCount, messageId);
+  await pool.query('UPDATE messages SET reaction_count = $1 WHERE id = $2', [newCount, messageId]);
 
   // Check which thresholds are newly crossed
   const newThresholds = [];
@@ -76,71 +83,73 @@ function incrementReaction(messageId, channelId, userId) {
 /**
  * Mark a threshold as sent for a message
  */
-function markThresholdSent(messageId, threshold) {
+async function markThresholdSent(messageId, threshold) {
   const columnName = `threshold_${threshold}_sent`;
-  db.prepare(`UPDATE messages SET ${columnName} = 1 WHERE id = ?`).run(messageId);
+  await pool.query(`UPDATE messages SET ${columnName} = 1 WHERE id = $1`, [messageId]);
 }
 
 /**
  * Decrement reaction count (for reaction_removed events)
  */
-function decrementReaction(messageId) {
-  const message = db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
+async function decrementReaction(messageId) {
+  const result = await pool.query('SELECT * FROM messages WHERE id = $1', [messageId]);
 
-  if (message && message.reaction_count > 0) {
-    db.prepare('UPDATE messages SET reaction_count = reaction_count - 1 WHERE id = ?').run(messageId);
+  if (result.rows.length > 0 && result.rows[0].reaction_count > 0) {
+    await pool.query('UPDATE messages SET reaction_count = reaction_count - 1 WHERE id = $1', [messageId]);
   }
 }
 
 /**
  * Get message stats (for debugging/admin purposes)
  */
-function getMessageStats(messageId) {
-  return db.prepare('SELECT * FROM messages WHERE id = ?').get(messageId);
+async function getMessageStats(messageId) {
+  const result = await pool.query('SELECT * FROM messages WHERE id = $1', [messageId]);
+  return result.rows[0];
 }
 
 /**
  * Increment a user's monthly helpful count
  */
-function incrementMonthlyHelpful(userId) {
+async function incrementMonthlyHelpful(userId) {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1; // JavaScript months are 0-indexed
 
-  db.prepare(`
+  await pool.query(`
     INSERT INTO monthly_stats (user_id, year, month, helpful_count)
-    VALUES (?, ?, ?, 1)
+    VALUES ($1, $2, $3, 1)
     ON CONFLICT(user_id, year, month)
-    DO UPDATE SET helpful_count = helpful_count + 1
-  `).run(userId, year, month);
+    DO UPDATE SET helpful_count = monthly_stats.helpful_count + 1
+  `, [userId, year, month]);
 }
 
 /**
  * Decrement a user's monthly helpful count
  */
-function decrementMonthlyHelpful(userId) {
+async function decrementMonthlyHelpful(userId) {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth() + 1;
 
-  db.prepare(`
+  await pool.query(`
     UPDATE monthly_stats
-    SET helpful_count = MAX(0, helpful_count - 1)
-    WHERE user_id = ? AND year = ? AND month = ?
-  `).run(userId, year, month);
+    SET helpful_count = GREATEST(0, helpful_count - 1)
+    WHERE user_id = $1 AND year = $2 AND month = $3
+  `, [userId, year, month]);
 }
 
 /**
  * Get top helpful users for a given month
  */
-function getTopHelpfulUsers(year, month, limit = 5) {
-  return db.prepare(`
+async function getTopHelpfulUsers(year, month, limit = 5) {
+  const result = await pool.query(`
     SELECT user_id, helpful_count
     FROM monthly_stats
-    WHERE year = ? AND month = ? AND helpful_count > 0
+    WHERE year = $1 AND month = $2 AND helpful_count > 0
     ORDER BY helpful_count DESC
-    LIMIT ?
-  `).all(year, month, limit);
+    LIMIT $3
+  `, [year, month, limit]);
+  return result.rows;
 }
 
 /**
@@ -154,6 +163,7 @@ function getPreviousMonth() {
 }
 
 module.exports = {
+  initializeDatabase,
   getOrCreateMessage,
   incrementReaction,
   decrementReaction,
