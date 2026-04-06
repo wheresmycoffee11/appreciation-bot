@@ -4,11 +4,25 @@ const { App } = require('@slack/bolt');
 const cron = require('node-cron');
 const db = require('./db');
 
+// Global error handlers — prevent any unhandled error from crashing the process
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+});
+
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
   socketMode: true,
   appToken: process.env.SLACK_APP_TOKEN
+});
+
+// Bolt app-level error handler
+app.error(async (error) => {
+  console.error('Bolt app error:', error);
 });
 
 const REACTION_NAME = 'helpful';
@@ -120,79 +134,87 @@ async function getMessageLink(client, channelId, messageTs) {
 
 // Listen for reaction_added events
 app.event('reaction_added', async ({ event, client }) => {
-  // Only track :helpful: reactions
-  if (event.reaction !== REACTION_NAME) {
-    return;
-  }
-
-  const { item, item_user } = event;
-
-  // Only handle message reactions
-  if (item.type !== 'message') {
-    return;
-  }
-
-  const messageId = `${item.channel}-${item.ts}`;
-  const channelId = item.channel;
-  const messageAuthorId = item_user;
-
-  // Don't notify if author reacts to their own message
-  if (event.user === messageAuthorId) {
-    console.log('Skipping self-reaction');
-    return;
-  }
-
-  // Increment reaction and check for new thresholds
-  const { newCount, newThresholds, userId } = await db.incrementReaction(
-    messageId,
-    channelId,
-    messageAuthorId
-  );
-
-  // Track monthly stats for the message author
-  await db.incrementMonthlyHelpful(messageAuthorId);
-
-  console.log(`Message ${messageId} now has ${newCount} helpful reactions`);
-
-  // Send DMs for any newly crossed thresholds
-  if (newThresholds.length > 0) {
-    // Fetch GIF, permalink, and open DM channel all in parallel for speed
-    const [messageLink, gifUrl, dmResult] = await Promise.all([
-      getMessageLink(client, channelId, item.ts),
-      getRandomGif(),
-      client.conversations.open({ users: userId })
-    ]);
-
-    const dmChannelId = dmResult.channel.id;
-
-    for (const threshold of newThresholds) {
-      await sendCongratsDMFast(client, dmChannelId, threshold, messageLink, gifUrl);
-      await db.markThresholdSent(messageId, threshold);
+  try {
+    // Only track :helpful: reactions
+    if (event.reaction !== REACTION_NAME) {
+      return;
     }
+
+    const { item, item_user } = event;
+
+    // Only handle message reactions
+    if (item.type !== 'message') {
+      return;
+    }
+
+    const messageId = `${item.channel}-${item.ts}`;
+    const channelId = item.channel;
+    const messageAuthorId = item_user;
+
+    // Don't notify if author reacts to their own message
+    if (event.user === messageAuthorId) {
+      console.log('Skipping self-reaction');
+      return;
+    }
+
+    // Increment reaction and check for new thresholds
+    const { newCount, newThresholds, userId } = await db.incrementReaction(
+      messageId,
+      channelId,
+      messageAuthorId
+    );
+
+    // Track monthly stats for the message author
+    await db.incrementMonthlyHelpful(messageAuthorId);
+
+    console.log(`Message ${messageId} now has ${newCount} helpful reactions`);
+
+    // Send DMs for any newly crossed thresholds
+    if (newThresholds.length > 0) {
+      // Fetch GIF, permalink, and open DM channel all in parallel for speed
+      const [messageLink, gifUrl, dmResult] = await Promise.all([
+        getMessageLink(client, channelId, item.ts),
+        getRandomGif(),
+        client.conversations.open({ users: userId })
+      ]);
+
+      const dmChannelId = dmResult.channel.id;
+
+      for (const threshold of newThresholds) {
+        await sendCongratsDMFast(client, dmChannelId, threshold, messageLink, gifUrl);
+        await db.markThresholdSent(messageId, threshold);
+      }
+    }
+  } catch (error) {
+    console.error('Error handling reaction_added:', error);
   }
 });
 
 // Listen for reaction_removed events
 app.event('reaction_removed', async ({ event }) => {
-  if (event.reaction !== REACTION_NAME) {
-    return;
+  try {
+    if (event.reaction !== REACTION_NAME) {
+      return;
+    }
+
+    if (event.item.type !== 'message') {
+      return;
+    }
+
+    const messageId = `${event.item.channel}-${event.item.ts}`;
+    const messageAuthorId = event.item_user;
+
+    await db.decrementReaction(messageId);
+
+    // Decrement monthly stats for the message author
+    if (messageAuthorId) {
+      await db.decrementMonthlyHelpful(messageAuthorId);
+    }
+
+    console.log(`Reaction removed from message ${messageId}`);
+  } catch (error) {
+    console.error('Error handling reaction_removed:', error);
   }
-
-  if (event.item.type !== 'message') {
-    return;
-  }
-
-  const messageId = `${event.item.channel}-${event.item.ts}`;
-  const messageAuthorId = event.item_user;
-
-  await db.decrementReaction(messageId);
-
-  // Decrement monthly stats for the message author
-  if (messageAuthorId) {
-    await db.decrementMonthlyHelpful(messageAuthorId);
-  }
-
-  console.log(`Reaction removed from message ${messageId}`);
 });
 
 /**
