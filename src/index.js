@@ -532,7 +532,6 @@ app.command('/appreciate-settings', async ({ command, ack, respond }) => {
 // ---------------------------------------------------------------------------
 
 app.event('app_home_opened', async ({ event, client }) => {
-  console.log('App Home opened by:', event.user, 'tab:', event.tab);
   if (event.tab !== 'home') return;
 
   try {
@@ -596,12 +595,10 @@ app.event('app_home_opened', async ({ event, client }) => {
       }
     );
 
-    console.log('Publishing App Home for:', userId, 'blocks:', blocks.length);
-    const result = await client.views.publish({
+    await client.views.publish({
       user_id: userId,
       view: { type: 'home', blocks: blocks }
     });
-    console.log('App Home published successfully:', result.ok);
   } catch (error) {
     console.error('Error rendering App Home:', error);
   }
