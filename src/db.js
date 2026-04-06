@@ -40,33 +40,27 @@ async function initializeDatabase() {
 }
 
 /**
- * Get or create a message record
+ * Increment reaction count atomically and return any newly crossed thresholds.
+ * Uses INSERT ON CONFLICT + UPDATE RETURNING to avoid race conditions.
  */
-async function getOrCreateMessage(messageId, channelId, userId) {
-  const existing = await pool.query('SELECT * FROM messages WHERE id = $1', [messageId]);
-
-  if (existing.rows.length > 0) {
-    return existing.rows[0];
-  }
-
+async function incrementReaction(messageId, channelId, userId) {
+  // Upsert the message row, then atomically increment and return in one query
   await pool.query(
-    'INSERT INTO messages (id, channel_id, user_id, reaction_count) VALUES ($1, $2, $3, 0)',
+    `INSERT INTO messages (id, channel_id, user_id, reaction_count)
+     VALUES ($1, $2, $3, 0)
+     ON CONFLICT (id) DO NOTHING`,
     [messageId, channelId, userId]
   );
 
-  const result = await pool.query('SELECT * FROM messages WHERE id = $1', [messageId]);
-  return result.rows[0];
-}
+  const result = await pool.query(
+    `UPDATE messages SET reaction_count = reaction_count + 1
+     WHERE id = $1
+     RETURNING *`,
+    [messageId]
+  );
 
-/**
- * Increment reaction count and return any newly crossed thresholds
- */
-async function incrementReaction(messageId, channelId, userId) {
-  const message = await getOrCreateMessage(messageId, channelId, userId);
-  const oldCount = message.reaction_count;
-  const newCount = oldCount + 1;
-
-  await pool.query('UPDATE messages SET reaction_count = $1 WHERE id = $2', [newCount, messageId]);
+  const message = result.rows[0];
+  const newCount = message.reaction_count;
 
   // Check which thresholds are newly crossed
   const newThresholds = [];
@@ -162,9 +156,15 @@ function getPreviousMonth() {
   return { year, month };
 }
 
+/**
+ * Close the connection pool for graceful shutdown
+ */
+async function close() {
+  await pool.end();
+}
+
 module.exports = {
   initializeDatabase,
-  getOrCreateMessage,
   incrementReaction,
   decrementReaction,
   markThresholdSent,
@@ -173,5 +173,6 @@ module.exports = {
   decrementMonthlyHelpful,
   getTopHelpfulUsers,
   getPreviousMonth,
+  close,
   THRESHOLDS
 };

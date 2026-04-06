@@ -151,6 +151,12 @@ app.event('reaction_added', async ({ event, client }) => {
     const channelId = item.channel;
     const messageAuthorId = item_user;
 
+    // item_user is sometimes missing (e.g. bot messages) — skip if so
+    if (!messageAuthorId) {
+      console.log('Skipping reaction: no message author available');
+      return;
+    }
+
     // Don't notify if author reacts to their own message
     if (event.user === messageAuthorId) {
       console.log('Skipping self-reaction');
@@ -393,13 +399,33 @@ app.command('/leaderboard', async ({ command, ack, respond }) => {
 // Schedule monthly leaderboard post for 9 AM on the 1st of every month
 cron.schedule('0 9 1 * *', () => {
   console.log('Running monthly leaderboard job...');
-  postMonthlyLeaderboard();
+  postMonthlyLeaderboard().catch((error) => {
+    console.error('Leaderboard cron job failed:', error);
+  });
 });
+
+// Graceful shutdown
+async function shutdown(signal) {
+  console.log(`Received ${signal}, shutting down...`);
+  try {
+    await app.stop();
+  } catch (_) { /* already stopped */ }
+  await db.close();
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Start the app
 (async () => {
-  await db.initializeDatabase();
-  await app.start();
-  console.log('⚡️ Appreciation Bot is running in socket mode!');
-  console.log('📊 Monthly leaderboard scheduled for 9 AM on the 1st of each month');
+  try {
+    await db.initializeDatabase();
+    await app.start();
+    console.log('⚡️ Appreciation Bot is running in socket mode!');
+    console.log('📊 Monthly leaderboard scheduled for 9 AM on the 1st of each month');
+  } catch (error) {
+    console.error('Fatal: failed to start', error);
+    process.exit(1);
+  }
 })();
