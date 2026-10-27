@@ -6,6 +6,11 @@
 app = "dao-appreciation-bot"
 primary_region = "iad"
 
+# node-cron runs on local time; Railway and Fly default to UTC, so the
+# "9 AM" digest and leaderboard posted at 5 AM Eastern until this was set.
+[env]
+  TZ = "America/New_York"
+
 [build]
   dockerfile = "Dockerfile"
 
