@@ -1,0 +1,14 @@
+# Appreciation Bot on Fly.io: a Socket Mode Slack worker with no public port.
+# Data lives in Supabase (project appreciation-bot); nothing on local disk.
+# Deploy: fly deploy --remote-only
+# Secrets (fly secrets): SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_SIGNING_SECRET,
+#   GIPHY_API_KEY, DATABASE_URL
+app = "dao-appreciation-bot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
